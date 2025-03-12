@@ -18,10 +18,7 @@ The goal of this project is to develop a chess-move predicting AI using  a Convo
 ├── 📁 data                  
 ├── 📁 models                
 ├── 📁 src                   
-│   ├── board_rep.py         
-│   ├── move_rep.py          
-│   ├── train.py             
-│   ├── predict.py           
+│   ├── chess-ai.ipynb                  
 ├── 📄 README.md              
 └── 📄 LICENSE                
 ```
