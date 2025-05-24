@@ -27,7 +27,7 @@ In der Schachbewertung gilt dabei: Positive Werte deuten auf einen Vorteil für 
 <br>
 
 <div style="text-align: center">
-  <img src="Minimax Algorithm.png" width="700"><br>
+  <img src="Minimax Algorithm.png" width="500"><br>
   <strong>Abbildung 1.1:</strong> Minimax-Suchbaum mit Tiefe 4
 </div>
 
@@ -54,10 +54,9 @@ Sobald Beta ≤ Alpha gilt, kann der entsprechende Teilbaum "abgeschnitten" werd
 
 
 <div style="text-align: center">
-  <img src="Pasted image 20250407164834.png" width="700"><br>
+  <img src="Pasted image 20250407164834.png" width="500"><br>
   <strong>Abbildung 1.2:</strong> Alpha-Beta Suchbaum mit eliminierten Zweigen
 </div>
-
 **Abbildung 1.2** verdeutlicht, wie eine Eliminierung eines Teilbaums (_Pruning_) aussehen kann.  
 Zunächst betrachtet der Algorithmus die Blätter:
 
@@ -74,5 +73,66 @@ Die Werte `α = -∞` und `β = 3` werden an den Vaterknoten übergeben, und der
     Der Zweig kann abgeschnitten werden, da Schwarz im linken Zweig bereits eine bessere Option (**3**) garantiert hat.
     
 Dieser Zweig wird also eliminiert, da der Minimax-Algorithmus  davon ausgeht, dass der Gegner den bestmöglichen Gegenzug spielt.
+
+
+
+
+### Schabrett Repräsentation durch Bitboards
+
+Zur rechenzeitoptimierten Verarbeitung von Schachstellungen setzt Stockfish auf Bitboards als zentrale Datenstruktur. Diese repräsentieren das 8×8-Schachbrett durch 64-Bit-Ganzzahlen, wobei jedes Bit einem Feld entspricht. Diese Darstellung ermöglicht extrem schnelle bitweise Operationen (AND, OR, XOR etc.), die die Grundlage der Evaluationsfunktion bilden. 
+
+<div style="text-align: center">
+  <img src="https://analog-hors.github.io/site/magic-bitboards/img/bitboard_demo_board.svg" width="500"><br>
+  <strong>Abbildung 1.3:</strong> Schachbrett-Stellung
+</div>
+
+
+**Beispiel:**  
+Die Position der Bauern in der obigen Abbildung ließe sich durch ein Bitboard folgendermaßen darstellen:
+
+```
+. . . . . . . .
+X X X X . X X X
+. . . . . . . .
+. . . . . . . .
+. . . . X . . .
+. . X . . . . .
+X X . . . X X X
+. . . . . . . .
+```
+
+### Die bitboard Schachzug - Generierung
+Für Zwecke der Schachzug-Generierung unterscheidet man zwischen sogenannten „springenden Figuren“ (engl. Leaping Pieces) und „gleitenden Figuren“ (engl. Sliding Pieces). Diese Unterscheidung basiert darauf, dass sich diese beiden Figurentypen in ihren Bewegungsmöglichkeiten und Einschränkungen deutlich unterscheiden.
+
+#### Springende Figuren (Bauer, Springer, König)
+
+Die Zugmöglichkeiten der springenden Figuren sind im Voraus berechnet und in einer Lookup-Tabelle hinterlegt. Während des Spiels kann man über den Index der aktuellen Position der Figur direkt auf diese Tabelle zugreifen und erhält als Ergebnis ein Bitboard, auf dem alle erlaubten Zielfelder mit einer ‚1‘ markiert sind. Durch diese vorher erstellte Tabelle wird viel Zeit gespart, da die Züge nicht berechnet, sondern einfach nachgeschlagen werden können
+
+
+```cpp
+//leeres Spielfeld
+U64 attacks, knights = 0ULL; 
+
+// platziert Springer auf dem Brett
+set_bit(knights, square);
+
+// Springer Züge lassen sich mithilfe von Bit-Shifts generieren
+attacks = (((knights >> 6)  | (knights << 10)) & ~FILE_GH) |
+          (((knights >> 10) | (knights << 6))  & ~FILE_AB) |
+          (((knights >> 15) | (knights << 17)) & ~FILE_H)  |
+          (((knights >> 17) | (knights << 15)) & ~FILE_A);
+```
+
+Erklärung zu der Berechnung:
+
+
+
+Code-Auszug aus: [Writing a chess engine in C++](https://ameye.dev/notes/chess-engine/)
+
+
+<div style="text-align: center">
+  <img src="https://ameye.dev/notes/chess-engine/knight-attacks.png-1112w.webp" width="500"><br>
+  <strong>Abbildung 1.3:</strong> Das Bewegungs-Muster des Springers
+</div>
 
 
