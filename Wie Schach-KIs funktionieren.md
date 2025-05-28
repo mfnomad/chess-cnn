@@ -14,9 +14,151 @@ Daher widmet sich dieses Studienprojekt der Analyse, wie moderne Schach-KIs dies
 
 
 
-## Wie funktioniert Stockfish?
+# Funktionsweise von Stockfish
 
 Stockfish zählt zu den bekanntesten und leistungsfähigsten Schach-Engines weltweit. Als Open-Source-Programm wird es kontinuierlich von einer aktiven Community weiterentwickelt. Es verfügt über die typischen Komponenten einer Schach-Engine wie Suchalgorithmus,  eine Bewertungsfunktion, Bitboard-Repräsentation und heuristische Verfahren.
+
+### Schachbrett Repräsentation durch Bitboards
+
+Um ein Schachbrett digital abbilden zu können, wird eine geeignete Datenstruktur benötigt, die sowohl kompakt als auch leistungsfähig bei der Verarbeitung ist. Stockfish verwendet hierfür sogenannte _Bitboards_: 64-Bit-Ganzzahlen, bei denen jedes Bit einem bestimmten Feld des 8×8-Brettes entspricht. Diese Darstellung ermöglicht extrem schnelle bitweise Operationen (AND, OR, XOR etc.), die die Grundlage der Evaluationsfunktion bilden. 
+
+<div style="text-align: center">
+  <img src="https://analog-hors.github.io/site/magic-bitboards/img/bitboard_demo_board.svg" width="500"><br>
+  <strong>Abbildung 1.1:</strong> Schachbrett-Stellung
+</div>
+
+image source: [Analog Hors - Magical Bitboards and How to Find Them: Sliding move generation in chess](https://analog-hors.github.io/site/magic-bitboards/)
+
+**Beispiel:**  
+Die Position der Bauern in der obigen Abbildung ließe sich durch ein Bitboard folgendermaßen darstellen:
+
+```
+. . . . . . . .
+1 1 1 1 . 1 1 1
+. . . . . . . .
+. . . . . . . .
+. . . . 1 . . .
+. . 1 . . . . .
+1 1 . . . 1 1 1
+. . . . . . . .
+```
+
+### Spielfigur Unterscheidung
+Für Zwecke der Schachzug-Generierung unterscheidet man zwischen sogenannten „springenden Figuren“ (engl. Leaping Pieces) und „gleitenden Figuren“ (engl. Sliding Pieces). Diese Unterscheidung basiert darauf, dass sich diese beiden Figurentypen in ihren Bewegungsmöglichkeiten und Einschränkungen deutlich unterscheiden.
+
+#### Springende Figuren (Bauer, Springer, König)
+
+Die Zugmöglichkeiten der springenden Figuren sind im Voraus berechnet und in einer Lookup-Tabelle hinterlegt. Während des Spiels kann man über den Index der aktuellen Position der Figur direkt auf diese Tabelle zugreifen und erhält als Ergebnis ein Bitboard, auf dem alle erlaubten Zielfelder mit einer ‚1‘ markiert sind. Durch diese vorher erstellte Tabelle wird viel Zeit gespart, da die Züge nicht berechnet, sondern einfach nachgeschlagen werden können
+
+
+```cpp
+//leeres Spielfeld
+U64 attacks, knights = 0ULL; 
+
+// platziert Springer auf dem Brett
+set_bit(knights, square);
+
+// Springer Züge lassen sich mithilfe von Bit-Shifts generieren
+attacks = (((knights >> 6)  | (knights << 10)) & ~FILE_GH) |
+          (((knights >> 10) | (knights << 6))  & ~FILE_AB) |
+          (((knights >> 15) | (knights << 17)) & ~FILE_H)  |
+          (((knights >> 17) | (knights << 15)) & ~FILE_A);
+```
+
+Erklärung zu der Berechnung:
+
+Der Springer bewegt sich in der Form eines 'L'. Das bedeutet beispielsweise, dass der Shift **>> 17** einer Verschiebung um 2 Zeilen (16 Bit) plus 1 Feld nach rechts (1 Bit) entspricht. Ähnlich funktioniert der Shift **<< 10** – er steht für eine Verschiebung um eine Zeile nach oben (8 Bit) und um zwei Felder nach rechts (2 Bit).
+
+
+Code-Auszug aus: [Writing a chess engine in C++](https://ameye.dev/notes/chess-engine/)
+
+
+<div style="text-align: center">
+  <img src="https://ameye.dev/notes/chess-engine/knight-attacks.png-1112w.webp" width="500"><br>
+  <strong>Abbildung 1.3:</strong> Das Bewegungs-Muster des Springers
+</div>
+
+
+#### Gleitende Figuren (Läufer, Turm, Dame)
+
+Problematik der Gleitenden Figuren:
+Gleitende Figuren wie Läufer, Türme und Damen können mehrere Felder in gerader Linie ziehen - aber nur so lange, bis sie auf einen "Blocker" treffen (entweder eine eigene oder eine gegnerische Figur).
+
+<div style="text-align: center">
+  <img src="https://analog-hors.github.io/site/magic-bitboards/img/a1_rook_board_blockers.svg" width="500"><br>
+  <strong>Abbildung 1.2:</strong> Der a1-Turm wird auf a5 und f1 in seiner geraden Bewegungslinie blockiert
+</div>
+
+Das heißt, wenn man die möglichen Züge der Gleitfiguren dynamisch berechnen wollte, müsste man folgende Schritte durchlaufen:
+
+1. Feld für Feld in jede mögliche Richtung iterieren (im Worst Case bis zu 6 Felder weit),
+2. Jedes dieser Felder daraufhin prüfen, ob es besetzt ist,
+3. Die Iteration beenden, sobald ein Blocker erkannt wird,  
+4. Wenn der Blocker eine gegnerische Figur ist, darf das Feld mit einbezogen werden – bei einer eigenen Figur nicht.
+
+Da dieser Vorgang bei Türmen und Läufern jeweils in vier Richtungen durchgeführt werden muss (bei der Dame sogar in acht), summiert sich der Rechenaufwand schnell auf. Für eine leistungsfähige Schach-KI ist das auf Dauer zu ineffizient.
+Um dieses Problem zu umgehen, nutzt man sogenannte **Magic Bitboards** – eine Technik, mit der man die möglichen Züge der Gleitfiguren blitzschnell per Lookup berechnen kann.
+
+
+##### Magic Bitboards
+
+Ansatz: Alle möglichen Blocker-Konfigurationen im Voraus berechnen und daraus einen Index erzeugen, der als Schlüssel für eine Nachschlagetabelle dient. Diese Tabelle enthält zu jedem Schlüssel die zugehörigen möglichen Zugfelder.
+
+Die relevanten Felder für den Turm in Abbildung 1.4 lassen sich als folgende Bitmaske kodieren:
+
+```
+. . . . . . . .
+1 . . . . . . .
+1 . . . . . . .
+1 . . . . . . .
+1 . . . . . . .
+1 . . . . . . .
+1 . . . . . . .
+. 1 1 1 1 1 1 .
+```
+
+Man  beachte, dass die Felder a8 und h1 für die Betrachtung nicht relevant sind, denn sie können keinen weiteren Felder als Blocker dienen.
+
+Das Ziel ist daher, eine Funktion zu finden, die diese ${2^{12}}$ = 4096 distinkten Blocker­-konfigurationen ihrer jeweiligen Menge an möglichen Zügen zuordnet. Die Reduzierung von ${2^{64}}$ (das gesamte Schachbrett) auf ${2^{12}}$  Konfigurationen ist bereits erfreulich, bringt jedoch das Problem **zerstreuter Indizes** mit sich.
+
+Eine ideale Nachschlage­tabelle sähe so aus:
+```cpp
+table[0], table[1], ..., table[4095]
+```
+- Die Indizes sind konsekutiv und lückenlos.
+- Sie liegen ausschließlich im Bereich  ${0}$  bis ${2^{12}} - 1$.
+
+In der Praxis enthält der 64‑Bit‑Wert jedoch nur 12 relevante Bits, die über den gesamten 64‑Bit‑Raum verteilt sein können. Ein Zugriff könnte zum Beispiel so aussehen:
+
+1. `0x0000000000000010`
+2. `0x0000000100000000`
+3. `0x0001000000000000`
+
+Obwohl jede Blocker­konfiguration nur 12 Bits nutzt, beansprucht sie den gesamten 64‑Bit‑Adressraum. Das macht deutlich, warum hier eine **Hashfunktion** benötigt wird, die diesen Raum auf kompakte, aufeinanderfolgende Indizes abbildet und damit ein einfaches Lookup ermöglicht.
+
+###### Hash-Verfahren:
+```cpp
+uint64_t blockers = // 64-Bit kodiertes Schachbrett, wobei nur die tiefsten 12 Bits gesetzt sind
+uint64_t magic    = // vorgerechnete "magische" Zahl
+                   
+                   // die Multiplikation bewirkt ein "Durchmischen" der gesetzten Bits
+int index         = (blockers * magic) >> (64 - 12); 
+//der abschließender Shift liefert die 12 höchsten Bits
+// Index ist somit eine Zahl zwischen 0 und 4095
+```
+
+Das Verfahren beweritk, dass eine kollisionsfreie Lookup-Tabelle entsteht. Die „magische“ Zahl wird im Vorfeld per Trial-and-Error berechnet und anschließend als Konstante verwendet. 
+
+
+### Wie Stockfish Schachzüge generiert
+Stockfish implementiert die Schachzug-Generierung in einem zweistufigen Verfahren, das zunächst pseudolegale Züge (d.h inklusive Züge, die den Schachregeln nach unzulässig sind) erzeugt und anschließend diese Menge auf legale Züge reduziert.
+
+Diese Trennung ist sinnvoll weil:
+- das Erzeugen pseudolegaler Züge extrem schnell über Bitoperationen möglich ist,
+- eine vollständige Legalitätsprüfung für alle Züge ineffizient wäre
+- in vielen Spielsituationen nur wenige Züge tatsächlich illegal sind. 
+
+Die Schachzug-Generierung erfolgt bei springenden Figuren über direkte Bitboard-Operationen, während für die gleitenden Figuren (Läufer und Türme) das zuvor beschriebene Magic Bitboards zum Einsatz kommt. Dieses erlaubt eine besonders effiziente Bestimmung der Angriffsflächen in konstanter Zeit O(1).
 
 ### Mini-Max Algorithmus:
 
@@ -44,7 +186,7 @@ Ein großer Nachteil bei der vollständigen Analyse **aller** möglichen Spielz�
 | 6           | 729,000,000       | 4 Studen  |
 | 7           | 21,870,000,000    | 5 Tage    |
 
-Es ist ersichtlich, dass der Suchbaum schnell extrem groß wird trotz einer schnellen Bewertungsfunktion. Eine zuverlässige Suche der Tiefe 6 bis 7 ist jedoch Voraussetzung für eine gute Schach-KI. Dies verdeutlicht die Notwendigkeit, die Größe des Suchbaums erheblich zu reduzieren. Hierfür wird das Alpha-Beta-Suchverfahren angewendet.
+Es ist ersichtlich, dass der Suchbaum schnell extrem groß wird trotz einer schnellen Bewertungsfunktion. Eine zuverlässige Suche der Tiefe 6 bis 7 ist jedoch Voraussetzung für eine gute Schach-KI. Dies verdeutlicht die Notwendigkeit, die Größe des Suchbaums erheblich zu reduzieren. Hierfür kommt das Alpha-Beta-Suchverfahren zum Einsatz.
 
 ### Alpha Beta Pruning:
 
@@ -55,16 +197,15 @@ Sobald Beta ≤ Alpha gilt, kann der entsprechende Teilbaum "abgeschnitten" werd
 
 <div style="text-align: center">
   <img src="Pasted image 20250407164834.png" width="500"><br>
-  <strong>Abbildung 1.2:</strong> Alpha-Beta Suchbaum mit eliminierten Zweigen
+  <strong>Abbildung 1.3:</strong> Alpha-Beta Suchbaum mit eliminierten Zweigen
 </div>
-**Abbildung 1.2** verdeutlicht, wie eine Eliminierung eines Teilbaums (_Pruning_) aussehen kann.  
+**Abbildung 1.3** verdeutlicht, wie eine Eliminierung eines Teilbaums (_Pruning_) aussehen kann.  
 Zunächst betrachtet der Algorithmus die Blätter:
 
 - Das erste Blatt hat den Wert **-1** → ist `-1 > α`? **Ja!** → also wird `α = -1`, `β = +∞` bleibt unverändert.
     
 - Dann wird das Blatt mit dem Wert **3** betrachtet → ist `3 > α`? **Ja!** → also wird `α = 3`, `β = +∞` bleibt ebenfalls unverändert.  
     Jetzt wird geprüft, ob die Pruning-Bedingung `β < α` erfüllt ist → hier nicht erfüllt ❌, also kein Pruning.
-    
 
 Die Werte `α = -∞` und `β = 3` werden an den Vaterknoten übergeben, und der rechte Teilbaum wird untersucht.
 
@@ -74,65 +215,35 @@ Die Werte `α = -∞` und `β = 3` werden an den Vaterknoten übergeben, und der
     
 Dieser Zweig wird also eliminiert, da der Minimax-Algorithmus  davon ausgeht, dass der Gegner den bestmöglichen Gegenzug spielt.
 
+# Evaluationsfunktion
 
+Die Bewertungsfunktion ist ein hauptsächlich was die Spielstärke von Stockfish ausmacht. Sie ordnet jeder Schachstellung eine numerische Bewertung zu, die angibt, wie vorteilhaft die Stellung für Weiß oder Schwarz ist. Ein Wert von 0.0 signalisiert eine ausgeglichene Stellung. Positive Bewertungen sprechen für einen Vorteil von Weiß,  negative Werte auf einen Vorteil für Schwarz. Diese Bewertung dient der Engine als Orientierung, um im Rahmen der Suche vielversprechende Stellungen zu erkennen und gezielt weiterzuverfolgen. Es handelt sich dabei um eine statische Bewertung – das bedeutet, dass die Stellung ohne Vorausberechnung zukünftiger Züge beurteilt wird; die eigentliche Suche übernimmt der Minimax-Algorithmus mit Alpha-Beta-Pruning.
 
+Die Bewertung stützt sich nicht allein auf das reine Materialverhältnis auf dem Brett. Es fließen auch strategische und taktische Faktoren in die Bewertung ein. Dazu gehören unter anderem:
 
-### Schabrett Repräsentation durch Bitboards
+- **Material**: Anzahl und Wert der verbleibenden Figuren 
+- **Mobilität**: wie viele sinnvolle Züge den Figuren zur Verfügung stehen
+- **Königssicherheit**: wie gut der eigene König geschützt ist
+- **Bauernstruktur**: Anordnung der Bauern und mögliche Schwächen wie isolierte oder doppelte Bauern
+- **Raumkontrolle**: welche Seite mehr Einfluss auf zentrale oder strategisch wichtige Felder ausübt
+- **Figurenkoordination**: wie effektiv die Figuren zusammenarbeiten und sich gegenseitig unterstützen
 
-Zur rechenzeitoptimierten Verarbeitung von Schachstellungen setzt Stockfish auf Bitboards als zentrale Datenstruktur. Diese repräsentieren das 8×8-Schachbrett durch 64-Bit-Ganzzahlen, wobei jedes Bit einem Feld entspricht. Diese Darstellung ermöglicht extrem schnelle bitweise Operationen (AND, OR, XOR etc.), die die Grundlage der Evaluationsfunktion bilden. 
-
-<div style="text-align: center">
-  <img src="https://analog-hors.github.io/site/magic-bitboards/img/bitboard_demo_board.svg" width="500"><br>
-  <strong>Abbildung 1.3:</strong> Schachbrett-Stellung
-</div>
-
-
-**Beispiel:**  
-Die Position der Bauern in der obigen Abbildung ließe sich durch ein Bitboard folgendermaßen darstellen:
-
+Außerdem nutzt Stockfish sogenannte Piece-Square Tables (PSQTs) – Tabellen mit vordefinierten Werten für jede Figur auf jedem einzelnen Feld des Schachbretts. Für jede Figurart existiert eine eigene 64-Werte-Tabelle, die einen Bonus bzw. Strafe je nach Position auf dem Brett vergibt.
+So erhalten beispielsweise Springer einen Bonus, wenn sie zentral platziert sind, Türme profitieren von offenen Linien, und Könige werden im Mittelspiel in den Ecken als sicherer bewertet, während sie im Endspiel für eine aktive Rolle zentralisiert werden sollen.
+Die Engine kombiniert Bewertungskriterien für Mittelspiel und Endspiel gleitend, abhängig davon, wie viel Material noch auf dem Brett ist.
+Beispielsweise die Königssicherheit ist im Mittelspiel besonders wichtig, während im Endspiel eher die Aktivität des Königs zählt.
+Dabei wird nicht zu einem festen Zeitpunkt zwischen Mittel- und Endspiel umgeschaltet, sondern ein fließender Übergang geschaffen – je weniger Figuren noch auf dem Brett sind, desto stärker fließt die Endspielbewertung ein.
 ```
-. . . . . . . .
-X X X X . X X X
-. . . . . . . .
-. . . . . . . .
-. . . . X . . .
-. . X . . . . .
-X X . . . X X X
-. . . . . . . .
+Eval = (phase * MiddlegameScore + (1 - phase) * EndgameScore) / totalPhase
 ```
 
-### Die bitboard Schachzug - Generierung
-Für Zwecke der Schachzug-Generierung unterscheidet man zwischen sogenannten „springenden Figuren“ (engl. Leaping Pieces) und „gleitenden Figuren“ (engl. Sliding Pieces). Diese Unterscheidung basiert darauf, dass sich diese beiden Figurentypen in ihren Bewegungsmöglichkeiten und Einschränkungen deutlich unterscheiden.
-
-#### Springende Figuren (Bauer, Springer, König)
-
-Die Zugmöglichkeiten der springenden Figuren sind im Voraus berechnet und in einer Lookup-Tabelle hinterlegt. Während des Spiels kann man über den Index der aktuellen Position der Figur direkt auf diese Tabelle zugreifen und erhält als Ergebnis ein Bitboard, auf dem alle erlaubten Zielfelder mit einer ‚1‘ markiert sind. Durch diese vorher erstellte Tabelle wird viel Zeit gespart, da die Züge nicht berechnet, sondern einfach nachgeschlagen werden können
-
-
-```cpp
-//leeres Spielfeld
-U64 attacks, knights = 0ULL; 
-
-// platziert Springer auf dem Brett
-set_bit(knights, square);
-
-// Springer Züge lassen sich mithilfe von Bit-Shifts generieren
-attacks = (((knights >> 6)  | (knights << 10)) & ~FILE_GH) |
-          (((knights >> 10) | (knights << 6))  & ~FILE_AB) |
-          (((knights >> 15) | (knights << 17)) & ~FILE_H)  |
-          (((knights >> 17) | (knights << 15)) & ~FILE_A);
-```
-
-Erklärung zu der Berechnung:
+Über viele Jahre hinweg nutzte Stockfish keine neuronalen Netze, sondern setzte vollständig auf handgeschriebene Bewertungsfunktionen, wie sie zuvor beschrieben wurden.
+Allerdings haben mittlerweile NNUE (Efficiently Updatable Neural Network) dies grundlegend verändert.
+Das NNUE-Modell wird:
+- auf Millionen hochwertiger Schachstellungen trainiert,
+- mit Bitboards kombiniert und effizient in die Suche integriert.
 
 
 
-Code-Auszug aus: [Writing a chess engine in C++](https://ameye.dev/notes/chess-engine/)
-
-
-<div style="text-align: center">
-  <img src="https://ameye.dev/notes/chess-engine/knight-attacks.png-1112w.webp" width="500"><br>
-  <strong>Abbildung 1.3:</strong> Das Bewegungs-Muster des Springers
-</div>
-
+  
 
