@@ -244,6 +244,239 @@ Das NNUE-Modell wird:
 - mit Bitboards kombiniert und effizient in die Suche integriert.
 
 
+# Mein Ansatz:
+
+Im Rahmen meiner eigenen Recherchen zu Convolutional Neural Networks (CNNs) habe ich herausgefunden, dass diese Architekturen der klassischen vollständig verbundenen Netzstruktur (fully-connected networks)  effektiver sind – insbesondere bei der Erkennung handschriftlicher Ziffern.  
+Wie LeCun et al. (1998) gezeigt haben, sind .
+
+CNNs sind aufgrund ihrer Fähigkeit, lokale räumliche Merkmale wie **Ecken und Kanten** zu erfassen, besonders gut für bildbasierte Aufgaben geeignet. 
+
+Diese Erkenntnis hat mein Interesse daran geweckt, inwiefern solche **räumlichen Merkmale** – etwa strukturelle Muster und lokale Abhängigkeiten – auch auf das **Schachbrett** und die dortige Stellungserkennung übertragbar sind. Insbesondere wollte ich untersuchen, ob CNNs in der Lage sind, strategisch relevante Muster auf dem Brett (z. B. Angriffe, Deckungen, Drohungen) ähnlich effizient zu erfassen wie Formen in einem Bild.
+
+# Problembeschreibung
+
+Das vorgestellte CNN-Modell hat die Aufgabe, den nächsten optimalen Schachzug vorherzusagen – es handelt sich um ein überwachtes **Klassifikationsproblem mit mehreren Klassen**. Die Eingabe ist ein 9×8×8-Tensor, der den aktuellen Spielzustand abbildet – inklusive Figurenpositionen, legaler Zugoptionen und Zugfarbe.
+
+Jeder mögliche Zug wird auf einen eindeutigen Index im Aktionsraum abgebildet. Das Modell gibt einen dieser Indizes als Vorhersage zurück – also die wahrscheinlichste Zugklasse aus einer fest definierten Menge.
+
+f: \mathbb{R}^{9 \times 8 \times 8} \rightarrow \{0, 1, \dots, K - 1\}
+${f: \mathbb{R}^{9 \times 8 \times 8} \rightarrow \{0, 1, \dots, K - 1\}}
+
+
+
+# Datensatz
+
+Der Datensatz, den ich für mein Projekt verwende, stammt von der Open-Source-Plattform **Kaggle**. Der ursprüngliche Datensatz umfasst rund **6,25 Millionen Schachpartien**, wobei die **ELO-Wertungen** der beteiligten Spieler im Bereich von **700 bis 3100** liegen.
+Da mein Ziel darin besteht, eine **stark spielende KI** zu entwickeln, habe ich den Datensatz gezielt gefiltert und nur Partien von Spielern mit einer ELO-Wertung über **2000** berücksichtigt.  
+Durch diese Einschränkung wurde der Datensatz auf etwa **883.376 Partien** reduziert.
+
+# Schachbrett - Repräsentation
+
+Wenn der Datensatz, der aus einer Historie von Schachzügen innerhalb eines Spiels besteht, als Eingabe für das Netzwerk dienen soll, muss man sich eine geeignete Repräsentation überlegen, da ein neuronales Netzwerk bekanntlich mit Matrizen und nicht mit bloßen Zeichenketten arbeitet.
+
+Als Grundlage lässt sich – ähnlich wie bei den Bitboards von Stockfish – das Schachbrett in einer 8×8-Matrix mit sechs Kanälen enkodieren, wobei jeder Kanal einer bestimmten Figurenart (z. B. Springer, Läufer, Bauer, König, Dame, Turm) zugeordnet ist. Die Figuren von Weiß werden durch eine **'1'** markiert, die von Schwarz entsprechend durch eine **'-1'**. Damit ist die Figurenkonstellation des Schachbretts zu einem bestimmten Zeitpunkt schonmal strukturiert abgebildet.
+
+Um der Eingabe zusätzliche Merkmale einer Schachstellung zu verleihen, wurden drei weitere Kanäle hinzugefügt:
+
+- **Herkunftszug-Kanal**: Dieser Kanal markiert alle Ausgangsfelder legaler Züge. Im Fall des Zugs „e2xc3“ wäre beispielsweise das Feld **e2** mit einer **1** belegt.
+    
+- **Zugziel-Kanal**: Dieser Kanal markiert die Zielfelder aller legalen Züge. Im oben genannten Beispiel wäre also das Feld **c3** als eines der Zielfelder durch mit einer 1 markiert.
+    
+- **Zug-Indikations-Kanal**: Das gesamte 8×8-Feld ist mit **1** belegt, wenn Weiß am Zug ist, sonst mit **–1** wenn Schwarz.
+
+
+
+```python
+    def createBoardRep(self, board):
+    """
+    Erzeugt eine mehrschichtige 8x8-Darstellung des Schachbretts.
+    Weiße Figuren: 1, schwarze: -1.
+    Zusätzliche Layer: legale Zugquellen, Zugziele, Zug am Zug (1/-1).
+    Rückgabe: np.array mit Form (9, 8, 8).
+    """
+    
+    
+        pieces = ['p', 'r', 'n', 'b', 'q', 'k']
+        layers = []
+
+        for piece in pieces:
+            layer = [[0 for _ in range(8)] for _ in range(8)]
+            for square, piece_obj in board.piece_map().items():
+                piece_type = piece_obj.symbol().lower()
+                if piece_type == piece:
+                    row = 7 - (square // 8)
+                    col = square % 8
+                    layer[row][col] = -1 if piece_obj.color == chess.BLACK else 1
+
+            layers.append(layer)
+
+        from_layer = np.zeros((8, 8), dtype=int)
+        for move in board.legal_moves:
+          from_square = move.from_square
+          row = 7 - (from_square // 8)
+          col = from_square % 8
+          from_layer[row][col] = 1
+        layers.append(from_layer)
+
+        # "To" squares layer
+        to_layer = np.zeros((8, 8), dtype=int)
+        for move in board.legal_moves:
+          to_square = move.to_square
+          row = 7 - (to_square // 8)
+          col = to_square % 8
+          to_layer[row][col] = 1
+        layers.append(to_layer)
+
+        # Turn indicator layer
+        turn_layer = np.full((8, 8), 1 if board.turn == chess.WHITE else -1, dtype=int)
+        layers.append(turn_layer)
+
+        return np.stack(layers)  # Shape: (9, 8, 8)
+
+```
+
+# Zug-Index Konversion
+
+Da das grundlegende Problem ein mehrklassiges Klassifikationsproblem ist, benötigen wir einen Weg, von einer Matrix-Schachstellung zu einer Integer-Indexzahl zu konvertieren und umgekehrt. Das Modell muss seinen Label-Move in einen Index konvertieren, sodass der Output einer Klasse entspricht. Der menschliche Nutzer des Modells braucht einen Weg, die Ausgabe des Modells - den Integer-Index - einem Schachzug zuzuordnen.
+
+In meiner Implementation habe ich durch alle Züge jeder Partie im Datensatz iteriert und unique Einträge im Nachschlag-Dictionary für jeden Zug erstellt. Das bedeutet, dass ein möglicher Zug möglicherweise nicht im Dictionary enthalten ist und somit nie vom Modell als Vorhersage ausgegeben wird. Diese Tatsache hat außerdem zur Folge, dass:
+
+- das Modell in Gefahr ist zu overfitten, indem es nicht generalisiert, sondern die meist gespielten Züge wiedergibt: Der große Aktionsraum, den unser Nachschlag-Dictionary darstellt, begünstigt diese Gefahr
+- das Ungleichgewicht der Klassen wird kritisch - Einige Züge (z. B. Bauernvorstöße oder Rochaden) können sehr häufig vorkommen, während seltene taktische Züge unterrepräsentiert sein können.
+
+## UCI - Format
+
+Zu beachten ist außerdem, dass der gesamte Datensatz ins **UCI-Format (Universal Chess Interface)** konvertiert wurde. Während die **algebraische Notation** (z. B. „Sf3“) die relative Figur und ihren Zielort beschreibt, verwendet UCI **absolute Koordinaten** für Start- und Zielfeld. Der erwähnte Springerzug würde im UCI-Format beispielsweise als `g1f3` dargestellt, falls der Springer auf g1 stünde.
+
+Diese Konvertierung bringt jedoch eine Herausforderung mit sich: **Züge von Spezialfiguren (wie Springer, Läufer etc.) lassen sich im UCI-Format nicht leicht von Bauernzügen unterscheiden**, da keine explizite Figurenangabe erfolgt. Dies birgt die Gefahr, dass das Modell während des Trainings verstärkt **Bauernzüge bevorzugt**, weil diese zahlenmäßig dominieren und keine Unterscheidung nach Figurentyp erfolgt.
+
+# Architektur
+
+Für die Problemstellung werden zwei KI-Architekturen von CNN-Netzen vorgestellt:
+
+
+```python
+def __init__(self, num_classes):
+        super(ChessCNNModule, self).__init__()
+        # conv1 -> relu -> conv2 -> relu -> flatten -> fc1 -> relu -> fc2
+        # shape of input data is (9,8,8)
+        self.conv1 = nn.Conv2d(9, 64, kernel_size=3, padding=1) 
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.Linear(8 * 8 * 128, 256)
+        self.fc2 = nn.Linear(256, num_classes)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+        x = self.flatten(x)
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)  # Output raw logits
+        return x
+```
+
+
+
+
+```python 
+class ChessCNNModule(nn.Module):
+    def __init__(self, num_classes):
+        super(ChessCNNModule, self).__init__()
+        
+        # Standard convolutions for local feature extraction
+        self.conv1 = nn.Conv2d(9, 64, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        
+        # Dilated convolutions for larger receptive field
+        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=2, dilation=2)  # dilation=2
+        self.conv4 = nn.Conv2d(256, 256, kernel_size=3, padding=4, dilation=4)  # dilation=4
+        
+        # Global Average Pooling instead of flatten
+        self.gap = nn.AdaptiveAvgPool2d(1)  # Reduces (B, 256, 8, 8) -> (B, 256, 1, 1)
+        
+        # Fully connected layers with gradual dimension reduction
+        self.fc1 = nn.Linear(256, 512)
+        self.fc2 = nn.Linear(512, 768)
+        self.fc3 = nn.Linear(768, num_classes)
+        
+        # Dropout for regularization
+        self.dropout = nn.Dropout(0.3)
+        
+        # Activation
+        self.relu = nn.ReLU()
+        
+        # Batch normalization for better training stability
+        self.bn1 = nn.BatchNorm2d(64)
+        self.bn2 = nn.BatchNorm2d(128)
+        self.bn3 = nn.BatchNorm2d(256)
+        self.bn4 = nn.BatchNorm2d(256)
+        
+        # Initialize weights
+        nn.init.kaiming_uniform_(self.conv1.weight, nonlinearity='relu')
+        nn.init.kaiming_uniform_(self.conv2.weight, nonlinearity='relu')
+        nn.init.kaiming_uniform_(self.conv3.weight, nonlinearity='relu')
+        nn.init.kaiming_uniform_(self.conv4.weight, nonlinearity='relu')
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.xavier_uniform_(self.fc2.weight)
+        nn.init.xavier_uniform_(self.fc3.weight)
+
+    def forward(self, x):
+        # Standard convolutions
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn2(self.conv2(x)))
+        
+        # Dilated convolutions for long-range dependencies
+        x = self.relu(self.bn3(self.conv3(x)))
+        x = self.relu(self.bn4(self.conv4(x)))
+        
+        # Global Average Pooling
+        x = self.gap(x)  # (B, 256, 1, 1)
+        x = x.view(x.size(0), -1)  # (B, 256)
+        
+        # Fully connected layers with dropout
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.relu(self.fc2(x))
+        x = self.dropout(x)
+        x = self.fc3(x)  # Output raw logits
+        return x
+```
+
+
+
+Anforderungen:
+- zitieren
+- quellen angeben
+
+für Dang wichtiger:
+"dass es methodisch gut ist", muss nicht unbedingt "funktionieren"
+→ Es braucht eine bewertung mittels train/test 
+
+
 
   
+
+Modelevaluierung:
+CNN Architektur erklären können
+→ weitere Conv2d ebenen einführen und Resultat vergleichen (vlt. 5-6 weitere Ebenen)
+
+
+Evaluation:
+- Train/test Split durchführen → Generralisierung beurteilen!!
+- Overfitting / Underfitting berücksichtigen 
+- Loss funktionen Metriken notieren
+
+# Ausarbeitung:
+
+soll ca. 20 Seiten am Ende befassen. Am Ende ergebnisse vorstellen!
+Mit Folien, Vorgehensweise, Ergebnisse
+ca. 15 Min Vortrag vorbereiten
+
+- Stockfish teil vervollständigen
+
+
+im Anschluss in der Ausarbeitung auf mein eigenes Engine eingehen
+und wie **gut** es funktioniert → Metriken!
+
 
